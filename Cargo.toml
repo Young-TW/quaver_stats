@@ -5,8 +5,8 @@ edition = "2024"
 
 [dependencies]
 axum = "0.8.1"
-reqwest = "0.12.15"
-serde = "1.0.219"
+reqwest = { version = "0.12.15", features = ["json"] }
+serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 tokio = "1.44.1"
 tower-http = "0.6.2"
