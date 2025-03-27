@@ -49,13 +49,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_user_id() {
-        let user_id = get_user_id("example_user").await.unwrap();
+        let user_id = get_user_id("tyrcs").await.unwrap();
         assert!(user_id.is_some());
     }
 
     #[tokio::test]
     async fn test_get_user_stat() {
-        let user_id = get_user_id("example_user").await.unwrap();
+        let user_id = get_user_id("tyrcs").await.unwrap();
         let user_stat = get_user_stat(&user_id.unwrap().id.to_string())
             .await
             .unwrap();
