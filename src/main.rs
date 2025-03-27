@@ -1,7 +1,6 @@
-use Quaver_Stats::card_info::CardInfo;
-use Quaver_Stats::quaver_api::get_user_stat;
+use Quaver_Stats::user::User;
 
 fn main() {
-    let response = get_user_stat("tyrcs");
-    // let card_info = CardInfo::new(response);
+    let mut player: User = User::new();
+    player.set_name("tyrcs".to_string());
 }
