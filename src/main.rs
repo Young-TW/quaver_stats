@@ -1,12 +1,16 @@
-use Quaver_Stats::user::User;
+mod card;
+mod user;
+
+use axum::{Router, routing::get, serve};
+use tokio::net::TcpListener;
 
 #[tokio::main]
 async fn main() {
-    let mut player: User = User::new();
-    player.set_name("tyrcs".to_string());
+    let app = Router::new().route("/card/{name}", get(card::generate_card));
 
-    let id = User::fetch_id(&player.name).await.unwrap();
-    let fetched = User::fetch_stat(id).await.unwrap();
+    let listener = TcpListener::bind("0.0.0.0:3000").await.unwrap();
 
-    println!("{:#?}", fetched);
+    println!("Listening on http://{}", listener.local_addr().unwrap());
+
+    serve(listener, app).await.unwrap();
 }
