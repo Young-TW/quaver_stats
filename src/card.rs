@@ -4,6 +4,8 @@ use axum::{
 };
 use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba};
 use std::io::Cursor;
+use image::io::Reader as ImageReader;
+use image::imageops::FilterType;
 
 use ab_glyph::{FontArc, PxScale};
 
@@ -31,8 +33,16 @@ pub async fn generate_card(Path(username): Path<String>) -> Response {
         }
     };
 
-    // 建立圖卡 256x192
-    let mut img = ImageBuffer::from_pixel(256, 192, Rgba([255, 255, 255, 255]));
+    // 建立圖卡 256x192，使用背景圖
+    let background_path = "assets/image/quaver.jpg";
+    let bg_img = ImageReader::open(background_path)
+        .expect("無法打開背景圖")
+        .decode()
+        .expect("無法解析背景圖")
+        .resize_exact(256, 192, FilterType::Lanczos3)
+        .to_rgba8();
+
+    let mut img = bg_img; // 用背景圖作為畫布
 
     // 載入字型（請確保 assets/JetBrainsMono.ttf 存在）
     let font = FontArc::try_from_slice(include_bytes!("../assets/JetBrainsMono/JetBrainsMono.ttf"))
@@ -43,7 +53,7 @@ pub async fn generate_card(Path(username): Path<String>) -> Response {
         format!("{} ({})", user_stat.name, user_stat.country),
         format!("Global Rank: #{}", user_stat.global_rank),
         format!("Country Rank: #{}", user_stat.country_rank),
-        format!("PP: {:.2}", user_stat.rating),
+        format!("rating: {:.2}", user_stat.rating),
         format!("Accuracy: {:.2}%", user_stat.accuracy),
     ];
 
