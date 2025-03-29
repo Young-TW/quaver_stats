@@ -3,7 +3,6 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 pub struct User {
-    pub id: u64,
     pub name: String,
     pub global_rank: u64,
     pub country_rank: u64,
@@ -13,22 +12,6 @@ pub struct User {
 }
 
 impl User {
-    pub fn new() -> Self {
-        User {
-            id: 0,
-            name: String::new(),
-            global_rank: 0,
-            country_rank: 0,
-            country: String::new(),
-            rating: 0.0,
-            accuracy: 0.0,
-        }
-    }
-
-    pub fn set_name(&mut self, name: String) {
-        self.name = name;
-    }
-
     pub async fn fetch_id(name: &str) -> Result<u64, Error> {
         #[derive(Debug, Deserialize)]
         struct UserSearchResponse {
@@ -54,7 +37,6 @@ impl User {
 
         #[derive(Debug, Deserialize)]
         struct RawUserDetail {
-            id: u64,
             username: String,
             country: String,
             #[serde(rename = "stats_keys4")]
@@ -81,7 +63,6 @@ impl User {
         let result: UserResponse = response.json().await?;
 
         Ok(User {
-            id: result.user.id,
             name: result.user.username,
             country: result.user.country,
             global_rank: result.user.stats.ranks.global,

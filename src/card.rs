@@ -4,7 +4,7 @@ use axum::{
 };
 use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba};
 use std::io::Cursor;
-use image::io::Reader as ImageReader;
+use image::ImageReader;
 use image::imageops::FilterType;
 
 use ab_glyph::{FontArc, PxScale};
