@@ -39,7 +39,7 @@ impl User {
         struct RawUserDetail {
             username: String,
             country: String,
-            #[serde(rename = "stats_keys4")]
+            #[serde(rename = "stats_keys7")]
             stats: RawStats,
         }
 
