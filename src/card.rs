@@ -47,7 +47,7 @@ pub async fn generate_card(Path(username): Path<String>) -> Response {
     // 載入字型（請確保 assets/JetBrainsMono.ttf 存在）
     let font = FontArc::try_from_slice(include_bytes!("../assets/JetBrainsMono/JetBrainsMono.ttf"))
         .unwrap();
-    let scale = PxScale::from(16.0);
+    let scale = PxScale::from(20.0);
 
     let lines = vec![
         format!("{} ({})", user_stat.name, user_stat.country),
@@ -83,5 +83,5 @@ fn draw_line(
     font: &FontArc,
 ) {
     use imageproc::drawing::draw_text_mut;
-    draw_text_mut(img, Rgba([0, 0, 0, 255]), x, y, scale, font, text);
+    draw_text_mut(img, Rgba([255, 255, 255, 255]), x, y, scale, font, text);
 }
