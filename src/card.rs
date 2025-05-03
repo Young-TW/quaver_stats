@@ -1,5 +1,5 @@
 use axum::{
-    extract::Path,
+    extract::{Path, Extension},
     response::{IntoResponse, Response},
 };
 use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba};
@@ -7,31 +7,53 @@ use std::io::Cursor;
 use image::ImageReader;
 use image::imageops::FilterType;
 use image::imageops::overlay;
+use std::sync::Arc;
 
 use ab_glyph::{FontArc, PxScale};
 
 use crate::user::User;
 use crate::avatar::fetch_avatar_from_url;
+use crate::cache::Cache;
 
-pub async fn generate_card(Path(username): Path<String>) -> Response {
+pub async fn generate_card(
+    Path(username): Path<String>,
+    Extension(cache): Extension<Arc<Cache>>,
+) -> Response {
+    // 檢查快取
+    if let Some(cached_image) = cache.get(&username).await {
+        return (
+            [(axum::http::header::CONTENT_TYPE, "image/png")],
+            cached_image,
+        )
+            .into_response();
+    }
+
+    // 如果快取不存在，生成卡片
+    let card_image = generate_card_image(&username).await;
+
+    // 將生成的卡片存入快取
+    cache.set(username.clone(), card_image.clone()).await;
+
+    (
+        [(axum::http::header::CONTENT_TYPE, "image/png")],
+        card_image,
+    )
+        .into_response()
+}
+
+async fn generate_card_image(username: &str) -> Vec<u8> {
     // 抓取玩家資料
     let user_id = match User::fetch_id(&username).await {
         Ok(u) => u,
         Err(_) => {
-            return Response::builder()
-                .status(404)
-                .body("User not found".into())
-                .unwrap();
+            return Vec::new();
         }
     };
 
     let user_stat = match User::fetch_stat(user_id).await {
         Ok(u) => u,
         Err(_) => {
-            return Response::builder()
-                .status(404)
-                .body("User not found".into())
-                .unwrap();
+            return Vec::new();
         }
     };
 
@@ -72,11 +94,7 @@ pub async fn generate_card(Path(username): Path<String>) -> Response {
     let dynimg = DynamicImage::ImageRgba8(img);
     dynimg.write_to(&mut buffer, ImageFormat::Png).unwrap();
 
-    (
-        [(axum::http::header::CONTENT_TYPE, "image/png")],
-        buffer.into_inner(),
-    )
-        .into_response()
+    buffer.into_inner()
 }
 
 // 繪製單行文字
