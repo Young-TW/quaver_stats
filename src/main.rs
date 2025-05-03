@@ -1,5 +1,6 @@
 mod card;
 mod user;
+mod avatar;
 
 use axum::{Router, routing::get, serve};
 use tokio::net::TcpListener;

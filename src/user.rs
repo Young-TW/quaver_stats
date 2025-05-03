@@ -9,6 +9,7 @@ pub struct User {
     pub country: String,
     pub rating: f64,
     pub accuracy: f64,
+    pub avatar_url: String, // 新增欄位
 }
 
 impl User {
@@ -39,6 +40,7 @@ impl User {
         struct RawUserDetail {
             username: String,
             country: String,
+            avatar_url: String, // 新增欄位
             #[serde(rename = "stats_keys7")]
             stats: RawStats,
         }
@@ -69,6 +71,7 @@ impl User {
             country_rank: result.user.stats.ranks.country,
             rating: result.user.stats.performance,
             accuracy: result.user.stats.accuracy,
+            avatar_url: result.user.avatar_url, // 提取 avatar_url
         })
     }
 }

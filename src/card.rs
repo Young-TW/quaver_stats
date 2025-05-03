@@ -6,10 +6,12 @@ use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba};
 use std::io::Cursor;
 use image::ImageReader;
 use image::imageops::FilterType;
+use image::imageops::overlay;
 
 use ab_glyph::{FontArc, PxScale};
 
 use crate::user::User;
+use crate::avatar::fetch_avatar_from_url;
 
 pub async fn generate_card(Path(username): Path<String>) -> Response {
     // 抓取玩家資料
@@ -44,6 +46,10 @@ pub async fn generate_card(Path(username): Path<String>) -> Response {
 
     let mut img = bg_img; // 用背景圖作為畫布
 
+    // 抓取並處理大頭照
+    let avatar = fetch_avatar_from_url(&user_stat.avatar_url, (64, 64)).await;
+    overlay(&mut img, &avatar.to_rgba8(), 10, 10); // 將大頭照繪製到卡片左上角
+
     // 載入字型（請確保 assets/JetBrainsMono.ttf 存在）
     let font = FontArc::try_from_slice(include_bytes!("../assets/JetBrainsMono/JetBrainsMono.ttf"))
         .unwrap();
@@ -58,7 +64,7 @@ pub async fn generate_card(Path(username): Path<String>) -> Response {
     ];
 
     for (i, line) in lines.iter().enumerate() {
-        draw_line(&mut img, &line, 10, 10 + i as i32 * 20, scale, &font);
+        draw_line(&mut img, &line, 10, 80 + i as i32 * 20, scale, &font); // 調整文字位置
     }
 
     // 輸出成 PNG
