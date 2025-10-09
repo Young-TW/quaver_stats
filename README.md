@@ -2,6 +2,8 @@
 
 quaver_stats provides a simple api to get player stats card from the quaver game.
 
+![CI/CD](https://github.com/Young-TW/quaver_stats/actions/workflows/rust.yml/badge.svg)
+
 ## Example
 
 once you run the server, you can access the player stats card by visiting the following URL:
