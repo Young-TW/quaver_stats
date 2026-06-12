@@ -24,10 +24,10 @@ impl Cache {
     // 獲取快取
     pub async fn get(&self, key: &str) -> Option<Vec<u8>> {
         let store = self.store.read().await;
-        if let Some(entry) = store.get(key) {
-            if entry.expires_at > Instant::now() {
-                return Some(entry.value.clone());
-            }
+        if let Some(entry) = store.get(key)
+            && entry.expires_at > Instant::now()
+        {
+            return Some(entry.value.clone());
         }
         None
     }
@@ -42,5 +42,41 @@ impl Cache {
                 expires_at: Instant::now() + self.ttl,
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_set_then_get_hits() {
+        let cache = Cache::new(Duration::from_secs(60));
+        cache.set("k".to_string(), vec![1, 2, 3]).await;
+        assert_eq!(cache.get("k").await, Some(vec![1, 2, 3]));
+    }
+
+    #[tokio::test]
+    async fn test_get_missing_key_returns_none() {
+        let cache = Cache::new(Duration::from_secs(60));
+        assert_eq!(cache.get("nope").await, None);
+    }
+
+    #[tokio::test]
+    async fn test_entry_expires_after_ttl() {
+        // TTL 為 0，存入後立即過期
+        let cache = Cache::new(Duration::from_millis(0));
+        cache.set("k".to_string(), vec![9]).await;
+        // 確保時間已前進超過過期點
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        assert_eq!(cache.get("k").await, None);
+    }
+
+    #[tokio::test]
+    async fn test_set_overwrites_existing_value() {
+        let cache = Cache::new(Duration::from_secs(60));
+        cache.set("k".to_string(), vec![1]).await;
+        cache.set("k".to_string(), vec![2]).await;
+        assert_eq!(cache.get("k").await, Some(vec![2]));
     }
 }
