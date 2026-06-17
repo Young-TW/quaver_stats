@@ -1,5 +1,6 @@
 use axum::{
     extract::{Path, Extension},
+    http::StatusCode,
     response::{IntoResponse, Response},
 };
 use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba};
@@ -19,11 +20,16 @@ const BACKGROUND_PATH: &str = "assets/image/quaver.jpg";
 const CARD_WIDTH: u32 = 256;
 const CARD_HEIGHT: u32 = 192;
 
+#[derive(Debug)]
+enum CardError {
+    UserNotFound,
+    UpstreamError,
+}
+
 pub async fn generate_card(
     Path(username): Path<String>,
     Extension(cache): Extension<Arc<Cache>>,
 ) -> Response {
-    // 檢查快取
     if let Some(cached_image) = cache.get(&username).await {
         return (
             [(axum::http::header::CONTENT_TYPE, "image/png")],
@@ -32,39 +38,37 @@ pub async fn generate_card(
             .into_response();
     }
 
-    // 如果快取不存在，生成卡片
-    let card_image = generate_card_image(&username).await;
-
-    // 將生成的卡片存入快取
-    cache.set(username.clone(), card_image.clone()).await;
-
-    (
-        [(axum::http::header::CONTENT_TYPE, "image/png")],
-        card_image,
-    )
-        .into_response()
+    let result = generate_card_image(&username).await;
+    resolve_card(&username, result, &cache).await
 }
 
-async fn generate_card_image(username: &str) -> Vec<u8> {
-    // 抓取玩家資料
-    let user_id = match User::fetch_id(username).await {
-        Ok(u) => u,
-        Err(_) => {
-            return Vec::new();
+// Caches the image on success and builds the appropriate HTTP response.
+// Extracted so that the caching/status logic can be tested without network calls.
+async fn resolve_card(username: &str, result: Result<Vec<u8>, CardError>, cache: &Cache) -> Response {
+    match result {
+        Ok(bytes) => {
+            cache.set(username.to_string(), bytes.clone()).await;
+            ([(axum::http::header::CONTENT_TYPE, "image/png")], bytes).into_response()
         }
+        Err(CardError::UserNotFound) => StatusCode::NOT_FOUND.into_response(),
+        Err(CardError::UpstreamError) => StatusCode::BAD_GATEWAY.into_response(),
+    }
+}
+
+async fn generate_card_image(username: &str) -> Result<Vec<u8>, CardError> {
+    let user_id = match User::fetch_id(username).await {
+        Ok(0) => return Err(CardError::UserNotFound),
+        Ok(id) => id,
+        Err(_) => return Err(CardError::UpstreamError),
     };
 
     let user_stat = match User::fetch_stat(user_id).await {
         Ok(u) => u,
-        Err(_) => {
-            return Vec::new();
-        }
+        Err(_) => return Err(CardError::UpstreamError),
     };
 
-    // 抓取並處理大頭照
     let avatar = fetch_avatar_from_url(&user_stat.avatar_url, (64, 64)).await;
-
-    render_card(&user_stat, &avatar)
+    Ok(render_card(&user_stat, &avatar))
 }
 
 /// 將玩家資料與頭像渲染成 PNG 位元組（純函式，不依賴網路，便於測試）。
@@ -125,6 +129,7 @@ fn draw_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn sample_user() -> User {
         User {
@@ -163,5 +168,13 @@ mod tests {
         let decoded = image::load_from_memory(&bytes).expect("輸出應為合法圖片");
         assert_eq!(decoded.width(), CARD_WIDTH);
         assert_eq!(decoded.height(), CARD_HEIGHT);
+    }
+
+    #[tokio::test]
+    async fn test_missing_user_returns_404_and_not_cached() {
+        let cache = Cache::new(Duration::from_secs(60));
+        let response = resolve_card("ghost", Err(CardError::UserNotFound), &cache).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(cache.get("ghost").await.is_none(), "failed lookup must not be cached");
     }
 }
