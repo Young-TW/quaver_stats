@@ -1,3 +1,8 @@
+//! Binary entry point for the Quaver stats card server.
+//!
+//! Starts an Axum HTTP server on `0.0.0.0:3001` that serves player stats cards
+//! at `GET /card/{name}`, backed by a 10-minute in-memory response cache.
+
 mod avatar;
 mod cache;
 mod card;

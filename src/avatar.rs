@@ -37,6 +37,17 @@ fn decode_and_resize(bytes: Vec<u8>, size: (u32, u32)) -> DynamicImage {
         .resize_exact(size.0, size.1, FilterType::Lanczos3)
 }
 
+/// Returns the avatar at `avatar_url` decoded and resized to `size`
+/// (`(width, height)`).
+///
+/// The raw bytes are cached on disk under the per-user cache directory, keyed
+/// by the SHA1 of `avatar_url`; a cache hit avoids the network request. On a
+/// miss the image is downloaded and written to the cache before being returned.
+///
+/// # Panics
+///
+/// Panics if the cache directory cannot be created, the download fails, or the
+/// bytes cannot be decoded as an image.
 pub async fn fetch_avatar_from_url(avatar_url: &str, size: (u32, u32)) -> DynamicImage {
     // 準備快取路徑 ~/.cache/quaver_stats/avatars/<sha1>.bin
     let cache_dir = avatar_cache_dir();

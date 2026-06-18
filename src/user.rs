@@ -1,14 +1,23 @@
 use reqwest::Error;
 use serde::Deserialize;
 
+/// A Quaver player's profile and 7K statistics, flattened from the API
+/// response.
 #[derive(Debug, Deserialize)]
 pub struct User {
+    /// The player's username.
     pub name: String,
+    /// The player's global 7K rank.
     pub global_rank: u64,
+    /// The player's country 7K rank.
     pub country_rank: u64,
+    /// The player's country code.
     pub country: String,
+    /// The player's overall 7K performance rating.
     pub rating: f64,
+    /// The player's overall 7K accuracy, as a percentage.
     pub accuracy: f64,
+    /// URL of the player's avatar image.
     pub avatar_url: String, // 新增欄位
 }
 
@@ -67,6 +76,11 @@ impl User {
         Ok(User::from_detail(result.user))
     }
 
+    /// Looks up a player by `name` via the Quaver user-search API and returns
+    /// the first matching user's ID.
+    ///
+    /// Returns `Ok(0)` when no user matches or the response cannot be parsed.
+    /// Returns `Err` only if the HTTP request itself fails.
     pub async fn fetch_id(name: &str) -> Result<u64, Error> {
         let url = format!("https://api.quavergame.com/v2/user/search/{}", name);
         let body = reqwest::get(&url).await?.text().await?;
@@ -74,6 +88,11 @@ impl User {
         Ok(Self::parse_id(&body).unwrap_or(0))
     }
 
+    /// Fetches the player with the given `id` from the Quaver user API and
+    /// builds a [`User`] from their 7K statistics.
+    ///
+    /// Returns `Err` if the HTTP request fails or the JSON response cannot be
+    /// deserialized.
     pub async fn fetch_stat(id: u64) -> Result<User, Error> {
         let url = format!("https://api.quavergame.com/v2/user/{}", id);
         let response = reqwest::get(&url).await?;
