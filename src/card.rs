@@ -1,20 +1,20 @@
 use axum::{
-    extract::{Path, Extension},
+    extract::{Extension, Path},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba};
-use std::io::Cursor;
 use image::ImageReader;
 use image::imageops::FilterType;
 use image::imageops::overlay;
+use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba};
+use std::io::Cursor;
 use std::sync::Arc;
 
 use ab_glyph::{FontArc, PxScale};
 
-use crate::user::User;
 use crate::avatar::fetch_avatar_from_url;
 use crate::cache::Cache;
+use crate::user::User;
 
 const BACKGROUND_PATH: &str = "assets/image/quaver.jpg";
 const CARD_WIDTH: u32 = 256;
@@ -44,7 +44,11 @@ pub async fn generate_card(
 
 // Caches the image on success and builds the appropriate HTTP response.
 // Extracted so that the caching/status logic can be tested without network calls.
-async fn resolve_card(username: &str, result: Result<Vec<u8>, CardError>, cache: &Cache) -> Response {
+async fn resolve_card(
+    username: &str,
+    result: Result<Vec<u8>, CardError>,
+    cache: &Cache,
+) -> Response {
     match result {
         Ok(bytes) => {
             cache.set(username.to_string(), bytes.clone()).await;
@@ -162,7 +166,10 @@ mod tests {
 
         assert!(!bytes.is_empty());
         // PNG 檔頭魔術位元組
-        assert_eq!(&bytes[..8], &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+        assert_eq!(
+            &bytes[..8],
+            &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]
+        );
 
         // 解碼回來應為設定的卡片尺寸
         let decoded = image::load_from_memory(&bytes).expect("輸出應為合法圖片");
@@ -175,6 +182,9 @@ mod tests {
         let cache = Cache::new(Duration::from_secs(60));
         let response = resolve_card("ghost", Err(CardError::UserNotFound), &cache).await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        assert!(cache.get("ghost").await.is_none(), "failed lookup must not be cached");
+        assert!(
+            cache.get("ghost").await.is_none(),
+            "failed lookup must not be cached"
+        );
     }
 }
