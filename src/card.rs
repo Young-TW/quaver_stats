@@ -26,6 +26,12 @@ enum CardError {
     UpstreamError,
 }
 
+/// Axum handler that returns a PNG stats card for the player named in the path.
+///
+/// On a cache hit the cached PNG is returned directly. On a miss the card is
+/// generated and, on success, cached before being returned with a
+/// `Content-Type: image/png` header. Returns `404 Not Found` if no such player
+/// exists and `502 Bad Gateway` if an upstream request fails.
 pub async fn generate_card(
     Path(username): Path<String>,
     Extension(cache): Extension<Arc<Cache>>,
