@@ -2,8 +2,8 @@ use image::DynamicImage;
 use image::ImageReader;
 use image::imageops::FilterType;
 use reqwest::Client;
-use sha1::Sha1;
 use sha1::Digest;
+use sha1::Sha1;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use tokio::fs;
@@ -13,7 +13,10 @@ fn cache_key(avatar_url: &str) -> String {
     let mut hasher = Sha1::new();
     hasher.update(avatar_url.as_bytes());
     let digest = hasher.finalize();
-    digest.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+    digest
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<String>()
 }
 
 /// 計算頭像快取的目錄路徑 `<cache_dir>/quaver_stats/avatars`。
@@ -37,7 +40,9 @@ fn decode_and_resize(bytes: Vec<u8>, size: (u32, u32)) -> DynamicImage {
 pub async fn fetch_avatar_from_url(avatar_url: &str, size: (u32, u32)) -> DynamicImage {
     // 準備快取路徑 ~/.cache/quaver_stats/avatars/<sha1>.bin
     let cache_dir = avatar_cache_dir();
-    fs::create_dir_all(&cache_dir).await.expect("無法建立快取資料夾");
+    fs::create_dir_all(&cache_dir)
+        .await
+        .expect("無法建立快取資料夾");
 
     let cache_path = cache_dir.join(format!("{}.bin", cache_key(avatar_url)));
 
@@ -48,7 +53,8 @@ pub async fn fetch_avatar_from_url(avatar_url: &str, size: (u32, u32)) -> Dynami
 
     // 快取不存在：下載
     let client = Client::new();
-    let avatar_bytes = client.get(avatar_url)
+    let avatar_bytes = client
+        .get(avatar_url)
         .send()
         .await
         .expect("無法下載大頭照")
@@ -66,7 +72,9 @@ pub async fn fetch_avatar_from_url(avatar_url: &str, size: (u32, u32)) -> Dynami
 /// 原子性寫入快取（先寫 tmp 再 rename），忽略 rename 競態錯誤。
 async fn write_cache(cache_path: &Path, bytes: &[u8]) {
     let tmp_path = cache_path.with_extension("tmp");
-    fs::write(&tmp_path, bytes).await.expect("無法寫入快取暫存檔");
+    fs::write(&tmp_path, bytes)
+        .await
+        .expect("無法寫入快取暫存檔");
     fs::rename(&tmp_path, cache_path).await.ok();
 }
 
@@ -94,10 +102,7 @@ mod tests {
     #[test]
     fn test_cache_key_known_value() {
         // 對照值來自標準 SHA1
-        assert_eq!(
-            cache_key("abc"),
-            "a9993e364706816aba3e25717850c26c9cd0d89d"
-        );
+        assert_eq!(cache_key("abc"), "a9993e364706816aba3e25717850c26c9cd0d89d");
     }
 
     #[test]

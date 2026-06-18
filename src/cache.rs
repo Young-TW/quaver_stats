@@ -4,7 +4,7 @@ use tokio::sync::RwLock;
 
 #[derive(Clone)]
 pub struct CacheEntry {
-    pub value: Vec<u8>, // 快取的資料，例如 PNG 圖片的二進位內容
+    pub value: Vec<u8>,      // 快取的資料，例如 PNG 圖片的二進位內容
     pub expires_at: Instant, // 過期時間
 }
 

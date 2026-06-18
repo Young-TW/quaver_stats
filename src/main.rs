@@ -1,13 +1,13 @@
-mod card;
-mod user;
 mod avatar;
 mod cache;
+mod card;
+mod user;
 
-use axum::{Router, routing::get, serve, extract::Extension};
-use tokio::net::TcpListener;
+use axum::{Router, extract::Extension, routing::get, serve};
+use cache::Cache;
 use std::sync::Arc;
 use std::time::Duration;
-use cache::Cache;
+use tokio::net::TcpListener;
 
 #[tokio::main]
 async fn main() {
