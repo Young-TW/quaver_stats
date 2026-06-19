@@ -28,13 +28,20 @@ fn avatar_cache_dir() -> PathBuf {
 }
 
 /// 解碼位元組並縮放成指定大小（自動猜測圖片格式）。
+///
+/// 位元組來自不受信任的來源（CDN 可能回傳 HTML 錯誤頁、限流回應或損毀檔案），
+/// 因此格式偵測與解碼失敗時不會 panic，而是回傳一張指定大小的透明佔位圖，
+/// 讓整個請求得以繼續而非讓任務崩潰。
 fn decode_and_resize(bytes: Vec<u8>, size: (u32, u32)) -> DynamicImage {
-    ImageReader::new(Cursor::new(bytes))
+    let decoded = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
-        .expect("無法解析大頭照格式")
-        .decode()
-        .expect("無法解碼大頭照")
-        .resize_exact(size.0, size.1, FilterType::Lanczos3)
+        .ok()
+        .and_then(|reader| reader.decode().ok());
+
+    match decoded {
+        Some(img) => img.resize_exact(size.0, size.1, FilterType::Lanczos3),
+        None => DynamicImage::new_rgba8(size.0, size.1),
+    }
 }
 
 /// Returns the avatar at `avatar_url` decoded and resized to `size`
@@ -44,10 +51,12 @@ fn decode_and_resize(bytes: Vec<u8>, size: (u32, u32)) -> DynamicImage {
 /// by the SHA1 of `avatar_url`; a cache hit avoids the network request. On a
 /// miss the image is downloaded and written to the cache before being returned.
 ///
+/// Bytes that cannot be decoded as an image (e.g. a CDN error page) yield a
+/// blank placeholder rather than panicking.
+///
 /// # Panics
 ///
-/// Panics if the cache directory cannot be created, the download fails, or the
-/// bytes cannot be decoded as an image.
+/// Panics if the cache directory cannot be created or the download fails.
 pub async fn fetch_avatar_from_url(avatar_url: &str, size: (u32, u32)) -> DynamicImage {
     // 準備快取路徑 ~/.cache/quaver_stats/avatars/<sha1>.bin
     let cache_dir = avatar_cache_dir();
@@ -133,6 +142,27 @@ mod tests {
         assert!(!tmp.with_extension("tmp").exists());
 
         let _ = fs::remove_file(&tmp).await;
+    }
+
+    /// 迴歸測試（issue #5）：CDN 回傳 HTML 錯誤頁、限流回應或損毀檔案時，
+    /// 解碼路徑不應 panic。預期行為是回傳錯誤 / 安全處理，而非讓 Axum 任務崩潰。
+    ///
+    /// 目前的 `decode_and_resize` 對不受信任的位元組呼叫 `.expect(...)`，因此這個
+    /// 測試在尚未修復前會因為 panic 而失敗（這是預期的）。
+    #[test]
+    fn test_decode_and_resize_invalid_bytes_does_not_panic() {
+        // 模擬 Quaver CDN 回傳一個 HTML 錯誤頁而非圖片。
+        let html_error_page = b"<html><body>503 Service Unavailable</body></html>".to_vec();
+
+        let result = std::panic::catch_unwind(|| {
+            decode_and_resize(html_error_page, (64, 64));
+        });
+
+        // 不應 panic：無效的位元組必須被安全處理，而不是 unwind 整個任務。
+        assert!(
+            result.is_ok(),
+            "decode_and_resize 在收到非圖片位元組時 panic 了；預期應安全回傳錯誤而非崩潰"
+        );
     }
 
     #[test]
