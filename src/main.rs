@@ -16,6 +16,13 @@ use tokio::net::TcpListener;
 
 #[tokio::main]
 async fn main() {
+    // 啟動時驗證必要資源是否存在，缺少時立即以非零狀態結束，
+    // 避免每次請求才 panic（GitHub issue #6）。
+    if let Err(err) = card::validate_assets() {
+        eprintln!("error: {err}");
+        std::process::exit(1);
+    }
+
     // 初始化快取，設定 TTL 為 10 分鐘
     let cache = Arc::new(Cache::new(Duration::from_secs(600)));
 

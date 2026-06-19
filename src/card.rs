@@ -26,6 +26,19 @@ enum CardError {
     UpstreamError,
 }
 
+/// Validates that the runtime asset files required to render cards are present.
+///
+/// The background image is loaded from disk on every request, so a missing
+/// `assets/` directory would otherwise panic the handler per request. Checking
+/// it once at startup lets the binary fail fast with a clear error instead
+/// (GitHub issue #6). Returns the path of the first missing asset.
+pub fn validate_assets() -> Result<(), String> {
+    if !std::path::Path::new(BACKGROUND_PATH).is_file() {
+        return Err(format!("required asset missing: {BACKGROUND_PATH}"));
+    }
+    Ok(())
+}
+
 /// Axum handler that returns a PNG stats card for the player named in the path.
 ///
 /// On a cache hit the cached PNG is returned directly. On a miss the card is
