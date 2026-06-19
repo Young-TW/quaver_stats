@@ -16,9 +16,21 @@ use crate::avatar::fetch_avatar_from_url;
 use crate::cache::Cache;
 use crate::user::User;
 
-const BACKGROUND_PATH: &str = "assets/image/quaver.jpg";
+const BACKGROUND_REL_PATH: &str = "image/quaver.jpg";
 const CARD_WIDTH: u32 = 256;
 const CARD_HEIGHT: u32 = 192;
+
+/// 解析背景圖的實際路徑。
+///
+/// 預設使用相對於工作目錄的 `assets/`，方便從 repo 根目錄 `cargo run`。
+/// 部署時（例如 Nix）可透過 `QUAVER_STATS_ASSETS_DIR` 環境變數指向
+/// 安裝後的資源目錄。
+pub fn background_path() -> std::path::PathBuf {
+    let dir = std::env::var_os("QUAVER_STATS_ASSETS_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("assets"));
+    dir.join(BACKGROUND_REL_PATH)
+}
 
 #[derive(Debug)]
 enum CardError {
@@ -33,8 +45,9 @@ enum CardError {
 /// it once at startup lets the binary fail fast with a clear error instead
 /// (GitHub issue #6). Returns the path of the first missing asset.
 pub fn validate_assets() -> Result<(), String> {
-    if !std::path::Path::new(BACKGROUND_PATH).is_file() {
-        return Err(format!("required asset missing: {BACKGROUND_PATH}"));
+    let bg = background_path();
+    if !bg.is_file() {
+        return Err(format!("required asset missing: {}", bg.display()));
     }
     Ok(())
 }
@@ -106,7 +119,7 @@ async fn generate_card_image(username: &str) -> Result<Vec<u8>, CardError> {
 /// 將玩家資料與頭像渲染成 PNG 位元組（純函式，不依賴網路，便於測試）。
 fn render_card(user_stat: &User, avatar: &DynamicImage) -> Vec<u8> {
     // 建立圖卡，使用背景圖
-    let bg_img = ImageReader::open(BACKGROUND_PATH)
+    let bg_img = ImageReader::open(background_path())
         .expect("無法打開背景圖")
         .decode()
         .expect("無法解析背景圖")
