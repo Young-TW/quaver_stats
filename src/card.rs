@@ -49,14 +49,23 @@ pub async fn generate_card(
     Path(username): Path<String>,
     Extension(cache): Extension<Arc<Cache>>,
 ) -> Response {
-    if let Some(cached_image) = cache.get(&username).await {
-        return (
-            [(axum::http::header::CONTENT_TYPE, "image/png")],
-            cached_image,
-        )
-            .into_response();
+    // Deduplicate the cache-miss path: when several requests race on the same
+    // cold key, exactly one renders the card and the rest await its result
+    // instead of each generating independently (issue #11). A failed render
+    // yields empty bytes, which `get_or_compute` neither caches nor treats as a
+    // hit; the precise error status is resolved below.
+    let bytes = cache
+        .get_or_compute(&username, || async {
+            generate_card_image(&username).await.unwrap_or_default()
+        })
+        .await;
+
+    if !bytes.is_empty() {
+        return ([(axum::http::header::CONTENT_TYPE, "image/png")], bytes).into_response();
     }
 
+    // Generation failed (or was not cached): resolve the error to its status.
+    // Failures are intentionally not cached, preserving the original behavior.
     let result = generate_card_image(&username).await;
     resolve_card(&username, result, &cache).await
 }
