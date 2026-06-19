@@ -6,6 +6,7 @@ use sha1::Digest;
 use sha1::Sha1;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tokio::fs;
 
 /// 以頭像 URL 的 SHA1 計算磁碟快取的檔名 key（純函式，便於測試）。
@@ -72,7 +73,11 @@ pub async fn fetch_avatar_from_url(avatar_url: &str, size: (u32, u32)) -> Dynami
     }
 
     // 快取不存在：下載
-    let client = Client::new();
+    // 設定 timeout，避免永不回應的上游無限期占用 Tokio worker（issue #7）。
+    let client = Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("無法建立 HTTP client");
     let avatar_bytes = client
         .get(avatar_url)
         .send()
@@ -162,6 +167,54 @@ mod tests {
         assert!(
             result.is_ok(),
             "decode_and_resize 在收到非圖片位元組時 panic 了；預期應安全回傳錯誤而非崩潰"
+        );
+    }
+
+    /// 迴歸測試（issue #7）：對外的 HTTP 請求必須設定 timeout。
+    ///
+    /// 模擬一個「永遠不回應」的上游：TCP 連線可以建立，但伺服器接受連線後
+    /// 既不回傳任何資料也不關閉連線。若 `fetch_avatar_from_url` 使用的
+    /// `reqwest` client 沒有設定 timeout（目前 `Client::new()` 即是如此），
+    /// 這個請求會無限期占用 Tokio worker，永遠不會結束。
+    ///
+    /// 預期（修復後）行為：client 設定了 timeout（issue 建議 10 秒），因此
+    /// 請求會在 timeout 視窗內結束（成功與否不重要，重點是「會結束」而非
+    /// 卡死）。我們以一個比 timeout 更寬的外層 12 秒上限來判定：若內層
+    /// 任務在 12 秒內結束（不論回傳或 panic），代表 timeout 生效；若外層
+    /// 12 秒先到，代表沒有 timeout、請求卡死，測試失敗。
+    ///
+    /// 目前尚未設定 timeout，因此此測試會因為內層永不結束而失敗（這是預期的）。
+    #[tokio::test]
+    async fn test_fetch_avatar_has_http_timeout_on_stalled_upstream() {
+        use std::time::Duration;
+
+        // 永不回應的上游：接受連線後把 socket 留著，從不寫入任何回應。
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                if let Ok((sock, _)) = listener.accept().await {
+                    // 持有 socket 使連線保持開啟，但永不回應。
+                    held.push(sock);
+                }
+            }
+        });
+
+        let url = format!("http://{}/never-responds.png", addr);
+
+        // 在獨立的 task 中執行，這樣即使下載失敗時 panic（expect），
+        // 也只會變成 JoinError 而不會讓整個測試 unwind；我們關心的是「是否在
+        // timeout 視窗內結束」。
+        let handle = tokio::spawn(async move { fetch_avatar_from_url(&url, (64, 64)).await });
+
+        // 外層上限（12 秒）大於 issue 建議的 10 秒 timeout，給 client 的 timeout
+        // 機會先觸發。
+        let outcome = tokio::time::timeout(Duration::from_secs(12), handle).await;
+
+        assert!(
+            outcome.is_ok(),
+            "對永不回應的上游發出的請求在 12 秒內沒有結束；表示外部 HTTP 請求沒有設定 timeout，會無限期占用 Tokio worker（issue #7）"
         );
     }
 
