@@ -1,0 +1,11 @@
+# cargo-audit policy. The Audit workflow runs `cargo audit -D warnings`, so even
+# non-vulnerability warnings (unmaintained/unsound/yanked) fail the gate. That is
+# deliberate, but a transitive dep we cannot fix must be consciously accepted here
+# with a documented reason rather than left to keep the gate red forever.
+[advisories]
+ignore = [
+    # paste is unmaintained (no security vuln). Pulled deep transitively via
+    # image -> ravif -> rav1e -> paste (AVIF encoder); quaver_stats can't move off
+    # it until that chain migrates. Revisit when `image` updates.
+    "RUSTSEC-2024-0436",
+]
