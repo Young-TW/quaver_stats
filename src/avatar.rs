@@ -67,9 +67,14 @@ pub async fn fetch_avatar_from_url(avatar_url: &str, size: (u32, u32)) -> Dynami
 
     let cache_path = cache_dir.join(format!("{}.bin", cache_key(avatar_url)));
 
-    // 若快取存在就讀取快取
-    if let Ok(bytes) = fs::read(&cache_path).await {
-        return decode_and_resize(bytes, size);
+    // 若快取存在就讀取快取（快取已存縮放後的位元組，直接解碼即可）
+    if let Ok(bytes) = fs::read(&cache_path).await
+        && let Some(img) = ImageReader::new(Cursor::new(bytes))
+            .with_guessed_format()
+            .ok()
+            .and_then(|r| r.decode().ok())
+    {
+        return img;
     }
 
     // 快取不存在：下載
@@ -87,11 +92,18 @@ pub async fn fetch_avatar_from_url(avatar_url: &str, size: (u32, u32)) -> Dynami
         .await
         .expect("無法讀取大頭照");
 
-    let bytes_vec = avatar_bytes.to_vec();
+    let resized = decode_and_resize(avatar_bytes.to_vec(), size);
 
-    write_cache(&cache_path, &bytes_vec).await;
+    // 將縮放後的圖片編碼為 PNG 寫入快取（issue #9：快取應存縮放後的位元組）
+    let mut encoded = Cursor::new(Vec::new());
+    if resized
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .is_ok()
+    {
+        write_cache(&cache_path, &encoded.into_inner()).await;
+    }
 
-    decode_and_resize(bytes_vec, size)
+    resized
 }
 
 /// 原子性寫入快取（先寫 tmp 再 rename），忽略 rename 競態錯誤。
@@ -228,5 +240,95 @@ mod tests {
         let resized = decode_and_resize(buf.into_inner(), (4, 4));
         assert_eq!(resized.width(), 4);
         assert_eq!(resized.height(), 4);
+    }
+
+    /// Regression test for GitHub issue #9:
+    /// "Perf: avatar disk cache stores pre-resize bytes; every hit pays full Lanczos3 decode+resize"
+    ///
+    /// Expected (correct) behaviour: after the first download the **resized** image
+    /// bytes are stored to disk. Reading the cache file and decoding it directly —
+    /// without a second call to `decode_and_resize` — must yield the requested
+    /// dimensions.
+    ///
+    /// On the current (buggy) code `write_cache` receives and persists the raw
+    /// pre-resize bytes. Decoding the cache file without resize therefore produces
+    /// the original 200×200 source image, not the requested 64×64, and the
+    /// assertion below FAILS — as intended for a regression test against an
+    /// unfixed bug.
+    #[tokio::test]
+    async fn test_issue9_cache_stores_resized_bytes() {
+        use image::ImageFormat;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let target_size = (64u32, 64u32);
+
+        // Build a 200×200 source PNG — deliberately larger than the 64×64 target
+        // so that a direct decode of the cached bytes reveals whether resize
+        // happened before the write (correct) or after the read (buggy).
+        let src = DynamicImage::new_rgba8(200, 200);
+        let mut buf = Cursor::new(Vec::new());
+        src.write_to(&mut buf, ImageFormat::Png).unwrap();
+        let png_bytes = buf.into_inner();
+
+        // Minimal HTTP/1.1 server: drain the incoming request then serve the PNG.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let png_for_server = png_bytes.clone();
+        tokio::spawn(async move {
+            // Keep looping so that any reqwest retries also get served.
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut req_buf = vec![0u8; 4096];
+                let _ = stream.read(&mut req_buf).await;
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    png_for_server.len()
+                );
+                let _ = stream.write_all(header.as_bytes()).await;
+                let _ = stream.write_all(&png_for_server).await;
+            }
+        });
+
+        // The URL is unique per test run (port changes), so there is no stale cache
+        // from a previous run; delete just in case.
+        let url = format!("http://{}/issue9-test-avatar.png", addr);
+        let cache_path = avatar_cache_dir().join(format!("{}.bin", cache_key(&url)));
+        let _ = fs::remove_file(&cache_path).await;
+
+        // Download and cache. Wrap in tokio::spawn so a .expect() panic inside
+        // becomes a JoinError rather than aborting the whole test.
+        let url_owned = url.clone();
+        let _ = tokio::spawn(async move {
+            fetch_avatar_from_url(&url_owned, target_size).await;
+        })
+        .await;
+
+        // The cache file must exist after the call.
+        let cached_bytes = fs::read(&cache_path)
+            .await
+            .expect("cache file should exist after fetch_avatar_from_url");
+
+        // Decode the cached bytes DIRECTLY — no decode_and_resize.
+        // After the fix: cache holds a 64×64 resized PNG → decodes to 64×64. ✓
+        // Current bug:  cache holds the raw 200×200 PNG  → decodes to 200×200. ✗
+        let cached_img = ImageReader::new(Cursor::new(cached_bytes))
+            .with_guessed_format()
+            .ok()
+            .and_then(|r| r.decode().ok())
+            .expect("cached bytes must be a valid decodable image");
+
+        // Clean up before asserting so a test failure does not leave stale files.
+        let _ = fs::remove_file(&cache_path).await;
+
+        assert_eq!(
+            (cached_img.width(), cached_img.height()),
+            target_size,
+            "disk cache contains a {}×{} image but should contain {}×{}; \
+             write_cache is persisting pre-resize bytes so every cache hit \
+             re-runs a full Lanczos3 decode+resize (GitHub issue #9)",
+            cached_img.width(),
+            cached_img.height(),
+            target_size.0,
+            target_size.1,
+        );
     }
 }
