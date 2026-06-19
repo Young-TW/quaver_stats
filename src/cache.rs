@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::future::Future;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
+use tokio::sync::{OnceCell, RwLock};
 
 /// A single cached value together with the instant it expires.
 #[derive(Clone)]
@@ -17,6 +19,9 @@ pub struct CacheEntry {
 /// async [`RwLock`], so all access goes through `async` methods.
 pub struct Cache {
     store: RwLock<HashMap<String, CacheEntry>>,
+    /// Per-key in-flight computations, used to deduplicate concurrent misses so
+    /// that a cold key is generated exactly once even under a request stampede.
+    in_flight: Mutex<HashMap<String, Arc<OnceCell<Vec<u8>>>>>,
     ttl: Duration, // 快取的存活時間
 }
 
@@ -25,6 +30,7 @@ impl Cache {
     pub fn new(ttl: Duration) -> Self {
         Self {
             store: RwLock::new(HashMap::new()),
+            in_flight: Mutex::new(HashMap::new()),
             ttl,
         }
     }
@@ -66,6 +72,55 @@ impl Cache {
             },
         );
     }
+
+    /// Returns the cached value for `key`, computing it with `compute` on a miss.
+    ///
+    /// Concurrent callers that miss on the same cold key share a single run of
+    /// `compute`: exactly one executes it while the others await its result.
+    /// This prevents the cache stampede of issue #11, where every concurrent
+    /// request for an uncached key would otherwise generate the value
+    /// independently. On completion the value is stored with the usual TTL, so
+    /// later callers take the normal cache path instead of recomputing.
+    ///
+    /// An empty result is treated as a non-value: it is deduplicated among the
+    /// in-flight callers but is **not** stored, so a later request recomputes
+    /// it. Callers use this to signal a failed computation that must not be
+    /// cached (e.g. an upstream error producing no card bytes).
+    pub async fn get_or_compute<F, Fut>(&self, key: &str, compute: F) -> Vec<u8>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Vec<u8>>,
+    {
+        if let Some(value) = self.get(key).await {
+            return value;
+        }
+
+        // Join an existing in-flight computation for this key, or register a new
+        // shared cell that all racing callers initialise through exactly once.
+        let cell = {
+            let mut in_flight = self.in_flight.lock().unwrap();
+            Arc::clone(in_flight.entry(key.to_string()).or_default())
+        };
+
+        let value = cell
+            .get_or_init(|| async {
+                let value = compute().await;
+                // Only persist real results; an empty value signals a failed
+                // computation that should not be cached (see the doc comment).
+                if !value.is_empty() {
+                    self.set(key.to_string(), value.clone()).await;
+                }
+                value
+            })
+            .await
+            .clone();
+
+        // The value now lives in the cache, so the in-flight entry is no longer
+        // needed; drop it so a future cold key starts a fresh computation.
+        self.in_flight.lock().unwrap().remove(key);
+
+        value
+    }
 }
 
 #[cfg(test)]
@@ -101,5 +156,73 @@ mod tests {
         cache.set("k".to_string(), vec![1]).await;
         cache.set("k".to_string(), vec![2]).await;
         assert_eq!(cache.get("k").await, Some(vec![2]));
+    }
+
+    /// Regression test for GitHub issue #11: concurrent requests for the same
+    /// uncached key must NOT each trigger an independent generation.
+    ///
+    /// The fix introduces a per-key in-flight guard so that, when N requests
+    /// race on a cold key, the expensive computation runs exactly once and all
+    /// waiters receive the same result. This test models the issue's concrete
+    /// example: 10 concurrent requests for one cold key. With proper in-flight
+    /// deduplication the generator runs exactly once; with the bug present every
+    /// request falls through the cache miss and generates independently (the
+    /// counter would read 10, not 1).
+    ///
+    /// This targets a `Cache::get_or_compute` deduplication entry point — the
+    /// guard the issue's acceptance criteria require. The production handler
+    /// (`generate_card`) should route its cache-miss path through it.
+    #[tokio::test]
+    async fn test_concurrent_cold_key_computes_once() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let cache = Arc::new(Cache::new(Duration::from_secs(60)));
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let cache = Arc::clone(&cache);
+            let calls = Arc::clone(&calls);
+            handles.push(tokio::spawn(async move {
+                cache
+                    .get_or_compute("hot-user", move || async move {
+                        // Stand in for the expensive generate_card_image work.
+                        // The sleep keeps the winner "in flight" long enough for
+                        // the other 9 requests to arrive and race the cold key.
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        vec![1, 2, 3]
+                    })
+                    .await
+            }));
+        }
+
+        let mut results = Vec::new();
+        for handle in handles {
+            results.push(handle.await.expect("spawned task should not panic"));
+        }
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "10 concurrent requests for one cold key must compute exactly once (issue #11)"
+        );
+        for result in &results {
+            assert_eq!(
+                result,
+                &vec![1, 2, 3],
+                "every concurrent waiter must receive the deduplicated result"
+            );
+        }
+
+        // After the in-flight request completes the value is cached, so a later
+        // request takes the normal cache path rather than recomputing.
+        assert_eq!(cache.get("hot-user").await, Some(vec![1, 2, 3]));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a post-completion request must hit the cache, not recompute"
+        );
     }
 }
