@@ -32,6 +32,18 @@ struct RawUser {
     id: u64,
 }
 
+#[derive(Debug)]
+enum ParseIdError {
+    NotFound,
+    Json,
+}
+
+impl From<serde_json::Error> for ParseIdError {
+    fn from(_: serde_json::Error) -> Self {
+        ParseIdError::Json
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct UserResponse {
     user: RawUserDetail,
@@ -62,11 +74,15 @@ struct Ranks {
 }
 
 impl User {
-    /// 從搜尋 API 的 JSON 字串解析出使用者 ID（取第一筆，無資料則回傳 0）。
-    /// 拆出純函式以便不依賴網路即可測試解析邏輯。
-    fn parse_id(body: &str) -> Result<u64, serde_json::Error> {
+    /// 從搜尋 API 的 JSON 字串解析出使用者 ID（取第一筆）。
+    /// 無匹配使用者回傳 Err(ParseIdError::NotFound)；JSON 格式錯誤回傳 Err(ParseIdError::Json)。
+    fn parse_id(body: &str) -> Result<u64, ParseIdError> {
         let result: UserSearchResponse = serde_json::from_str(body)?;
-        Ok(result.users.first().map(|u| u.id).unwrap_or(0))
+        result
+            .users
+            .first()
+            .map(|u| u.id)
+            .ok_or(ParseIdError::NotFound)
     }
 
     /// 從使用者 API 的 JSON 字串解析出 `User`。
@@ -124,9 +140,9 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_id_empty_returns_zero() {
+    fn test_parse_id_empty_returns_not_found() {
         let body = r#"{ "users": [] }"#;
-        assert_eq!(User::parse_id(body).unwrap(), 0);
+        assert!(User::parse_id(body).is_err());
     }
 
     #[test]
@@ -164,6 +180,22 @@ mod tests {
         // 缺少 stats_keys7，應反序列化失敗
         let body = r#"{ "user": { "username": "x", "country": "US", "avatar_url": "" } }"#;
         assert!(User::parse_stat(body).is_err());
+    }
+
+    // Regression for issue #3: parse_id silently returned Ok(0) when the
+    // search result contained no users, causing generate_card_image to call
+    // fetch_stat(0) and make a wasted HTTP round-trip.
+    // Expected: parse_id must NOT return Ok(0) for an empty users array —
+    // it must signal "not found" distinctly (e.g. Err, or Ok(None) once the
+    // return type is updated to Result<Option<u64>, _>).
+    #[test]
+    fn test_parse_id_empty_users_signals_not_found() {
+        let body = r#"{"users":[]}"#;
+        let result = User::parse_id(body);
+        assert!(
+            result.map_or(true, |id| id != 0),
+            "parse_id returned Ok(0) for empty users array; see issue #3"
+        );
     }
 
     // 此測試會打真實的 Quaver API，預設忽略以避免 CI 受網路/外部資料影響。
