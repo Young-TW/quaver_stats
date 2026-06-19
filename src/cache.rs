@@ -50,13 +50,28 @@ impl Cache {
     /// ```
     // 獲取快取
     pub async fn get(&self, key: &str) -> Option<Vec<u8>> {
-        let store = self.store.read().await;
-        if let Some(entry) = store.get(key)
-            && entry.expires_at > Instant::now()
         {
-            return Some(entry.value.clone());
+            let store = self.store.read().await;
+            match store.get(key) {
+                Some(entry) if entry.expires_at > Instant::now() => {
+                    return Some(entry.value.clone());
+                }
+                None => return None,
+                _ => {} // expired — fall through to evict under write lock
+            }
         }
-        None
+
+        // Evict the expired entry under a write lock.  Re-check expiry in case
+        // another thread refreshed the entry between our two lock acquisitions.
+        let mut store = self.store.write().await;
+        match store.get(key) {
+            Some(entry) if entry.expires_at > Instant::now() => Some(entry.value.clone()),
+            Some(_) => {
+                store.remove(key);
+                None
+            }
+            None => None,
+        }
     }
 
     /// Inserts `value` under `key`, overwriting any existing entry, with an
@@ -223,6 +238,48 @@ mod tests {
             calls.load(Ordering::SeqCst),
             1,
             "a post-completion request must hit the cache, not recompute"
+        );
+    }
+
+    /// Regression test for GitHub issue #4: expired entries must be evicted
+    /// from the backing `HashMap`, not merely skipped by `get`.
+    ///
+    /// Bug: `Cache::get` checks `expires_at > Instant::now()` and returns
+    /// `None` for stale entries, but never removes them. The `HashMap`
+    /// therefore grows monotonically — every unique username ever requested
+    /// occupies a `CacheEntry` (with a full PNG blob) indefinitely, causing
+    /// OOM under sustained load.
+    ///
+    /// Expected (correct) behaviour: after TTL expiry, the backing store must
+    /// be empty (`store.len() == 0`), not merely returning `None` from `get`.
+    #[tokio::test]
+    async fn test_expired_entries_are_evicted_from_backing_store() {
+        let cache = Cache::new(Duration::from_millis(0));
+
+        // Populate 1 000 unique keys, mirroring the soak scenario in the issue.
+        for i in 0..1_000usize {
+            cache.set(format!("user-{i}"), vec![i as u8]).await;
+        }
+
+        // Ensure every entry has passed its TTL.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        // Access (miss) every key so any lazy-eviction path has a chance to run.
+        for i in 0..1_000usize {
+            assert_eq!(
+                cache.get(&format!("user-{i}")).await,
+                None,
+                "get must return None for expired key user-{i}"
+            );
+        }
+
+        // The critical assertion from the issue: the store itself must be empty.
+        // A non-zero length here proves the memory leak is present.
+        let store_len = cache.store.read().await.len();
+        assert_eq!(
+            store_len, 0,
+            "backing HashMap must be empty after all entries expire; \
+             found {store_len} stale entries — they are never evicted (issue #4)"
         );
     }
 }
