@@ -88,6 +88,13 @@ impl Cache {
         );
     }
 
+    /// Returns the number of entries that are currently live (not yet expired).
+    pub async fn len(&self) -> usize {
+        let store = self.store.read().await;
+        let now = Instant::now();
+        store.values().filter(|e| e.expires_at > now).count()
+    }
+
     /// Returns the cached value for `key`, computing it with `compute` on a miss.
     ///
     /// Concurrent callers that miss on the same cold key share a single run of
@@ -141,6 +148,33 @@ impl Cache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_len_empty_cache_is_zero() {
+        let cache = Cache::new(Duration::from_secs(60));
+        assert_eq!(cache.len().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_len_counts_live_entries_only() {
+        // One entry with a real TTL, one that expires immediately.
+        let cache = Cache::new(Duration::from_secs(60));
+        cache.set("live".to_string(), vec![1]).await;
+        {
+            // Insert an already-expired entry by using a zero-TTL cache and
+            // sharing the backing store via a second cache instance is not
+            // possible, so we rely on the write-lock path: insert, then
+            // manually confirm via get (which evicts on read — but len() uses
+            // an independent read so we just verify count after expiry).
+            let short = Cache::new(Duration::from_millis(0));
+            short.set("gone".to_string(), vec![2]).await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            // The expired entry is in `short`, not in `cache`; we test `cache`
+            // which holds exactly one live entry.
+            assert_eq!(short.len().await, 0, "expired entry must not be counted");
+        }
+        assert_eq!(cache.len().await, 1);
+    }
 
     #[tokio::test]
     async fn test_set_then_get_hits() {
