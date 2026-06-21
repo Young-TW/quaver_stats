@@ -84,8 +84,10 @@ pub async fn generate_card(
         Err(()) => return StatusCode::BAD_REQUEST.into_response(),
     };
 
-    // Cache key includes the mode so 4K and 7K cards are stored independently.
-    let cache_key = format!("{}:{}", username, mode.as_str());
+    // Quaver usernames are case-insensitive; collapse to one cache slot per player.
+    // Cache key also includes the mode so 4K and 7K cards are stored independently.
+    let key = username.to_lowercase();
+    let cache_key = format!("{}:{}", key, mode.as_str());
 
     // Deduplicate the cache-miss path: when several requests race on the same
     // cold key, exactly one renders the card and the rest await its result
@@ -94,9 +96,7 @@ pub async fn generate_card(
     // hit; the precise error status is resolved below.
     let bytes = cache
         .get_or_compute(&cache_key, || async {
-            generate_card_image(&username, mode)
-                .await
-                .unwrap_or_default()
+            generate_card_image(&key, mode).await.unwrap_or_default()
         })
         .await;
 
@@ -106,7 +106,7 @@ pub async fn generate_card(
 
     // Generation failed (or was not cached): resolve the error to its status.
     // Failures are intentionally not cached, preserving the original behavior.
-    let result = generate_card_image(&username, mode).await;
+    let result = generate_card_image(&key, mode).await;
     resolve_card(&cache_key, result, &cache).await
 }
 
@@ -288,6 +288,36 @@ mod tests {
         assert!(
             cache.get("ghost:7k").await.is_none(),
             "failed lookup must not be cached"
+        );
+    }
+
+    /// Regression test: usernames must be normalised to lowercase before the
+    /// cache lookup so that 'PlayerName', 'playername', and 'PLAYERNAME' all
+    /// share one cache slot instead of creating three independent entries.
+    #[tokio::test]
+    async fn test_generate_card_normalizes_username_to_lowercase() {
+        let cache = Arc::new(Cache::new(Duration::from_secs(60)));
+        // Pre-seed the cache under the canonical lowercase key (default mode: 7k).
+        cache.set("playername:7k".to_string(), vec![0u8; 4]).await;
+
+        // A mixed-case request must normalise to "playername" and hit the
+        // pre-seeded entry without making any upstream network calls.
+        let response = generate_card(
+            Path("PlayerName".to_string()),
+            Query(CardQuery { mode: None }),
+            Extension(Arc::clone(&cache)),
+        )
+        .await;
+
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "mixed-case request must hit the lowercase cache entry"
+        );
+        // The handler must not create a separate entry under the un-normalised key.
+        assert!(
+            cache.get("PlayerName:7k").await.is_none(),
+            "un-normalised key must not be stored separately"
         );
     }
 }
