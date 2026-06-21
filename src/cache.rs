@@ -8,7 +8,7 @@ use tokio::sync::{OnceCell, RwLock};
 #[derive(Clone)]
 pub struct CacheEntry {
     /// The cached bytes, e.g. the binary contents of a PNG image.
-    pub value: Vec<u8>, // 快取的資料，例如 PNG 圖片的二進位內容
+    pub value: Arc<Vec<u8>>, // 快取的資料，例如 PNG 圖片的二進位內容
     /// The instant at and after which this entry is considered expired.
     pub expires_at: Instant, // 過期時間
 }
@@ -39,22 +39,23 @@ impl Cache {
     /// absent or its entry has expired.
     ///
     /// ```
+    /// # use std::sync::Arc;
     /// # use std::time::Duration;
     /// # use quaver_stats::cache::Cache;
     /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
     /// let cache = Cache::new(Duration::from_secs(60));
     /// assert_eq!(cache.get("absent").await, None);
     /// cache.set("k".to_string(), vec![1, 2, 3]).await;
-    /// assert_eq!(cache.get("k").await, Some(vec![1, 2, 3]));
+    /// assert_eq!(cache.get("k").await, Some(Arc::new(vec![1, 2, 3])));
     /// # });
     /// ```
     // 獲取快取
-    pub async fn get(&self, key: &str) -> Option<Vec<u8>> {
+    pub async fn get(&self, key: &str) -> Option<Arc<Vec<u8>>> {
         {
             let store = self.store.read().await;
             match store.get(key) {
                 Some(entry) if entry.expires_at > Instant::now() => {
-                    return Some(entry.value.clone());
+                    return Some(Arc::clone(&entry.value));
                 }
                 None => return None,
                 _ => {} // expired — fall through to evict under write lock
@@ -65,7 +66,7 @@ impl Cache {
         // another thread refreshed the entry between our two lock acquisitions.
         let mut store = self.store.write().await;
         match store.get(key) {
-            Some(entry) if entry.expires_at > Instant::now() => Some(entry.value.clone()),
+            Some(entry) if entry.expires_at > Instant::now() => Some(Arc::clone(&entry.value)),
             Some(_) => {
                 store.remove(key);
                 None
@@ -82,13 +83,14 @@ impl Cache {
         store.insert(
             key,
             CacheEntry {
-                value,
+                value: Arc::new(value),
                 expires_at: Instant::now() + self.ttl,
             },
         );
     }
 
     /// Returns the number of entries that are currently live (not yet expired).
+    #[allow(clippy::len_without_is_empty)]
     pub async fn len(&self) -> usize {
         let store = self.store.read().await;
         let now = Instant::now();
@@ -114,7 +116,7 @@ impl Cache {
         Fut: Future<Output = Vec<u8>>,
     {
         if let Some(value) = self.get(key).await {
-            return value;
+            return (*value).clone();
         }
 
         // Join an existing in-flight computation for this key, or register a new
@@ -148,6 +150,7 @@ impl Cache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_len_empty_cache_is_zero() {
@@ -180,7 +183,7 @@ mod tests {
     async fn test_set_then_get_hits() {
         let cache = Cache::new(Duration::from_secs(60));
         cache.set("k".to_string(), vec![1, 2, 3]).await;
-        assert_eq!(cache.get("k").await, Some(vec![1, 2, 3]));
+        assert_eq!(cache.get("k").await, Some(Arc::new(vec![1, 2, 3])));
     }
 
     #[tokio::test]
@@ -204,7 +207,7 @@ mod tests {
         let cache = Cache::new(Duration::from_secs(60));
         cache.set("k".to_string(), vec![1]).await;
         cache.set("k".to_string(), vec![2]).await;
-        assert_eq!(cache.get("k").await, Some(vec![2]));
+        assert_eq!(cache.get("k").await, Some(Arc::new(vec![2])));
     }
 
     /// Regression test for GitHub issue #11: concurrent requests for the same
@@ -267,11 +270,44 @@ mod tests {
 
         // After the in-flight request completes the value is cached, so a later
         // request takes the normal cache path rather than recomputing.
-        assert_eq!(cache.get("hot-user").await, Some(vec![1, 2, 3]));
+        assert_eq!(cache.get("hot-user").await, Some(Arc::new(vec![1, 2, 3])));
         assert_eq!(
             calls.load(Ordering::SeqCst),
             1,
             "a post-completion request must hit the cache, not recompute"
+        );
+    }
+
+    /// Regression test for GitHub issue #8: `Cache::get` must return
+    /// `Arc<Vec<u8>>` so that concurrent readers share one backing allocation
+    /// instead of each receiving an independent deep copy of the cached bytes.
+    ///
+    /// Expected (correct) behaviour:
+    /// - `Cache::get` returns `Option<Arc<Vec<u8>>>`.
+    /// - Two successive calls for the same live key return `Arc`s that point to
+    ///   the **same** allocation (`Arc::ptr_eq` returns `true`), proving no copy
+    ///   was made.
+    ///
+    /// On the current (unfixed) code this test fails at **compile time** because
+    /// `Cache::get` still returns `Option<Vec<u8>>`, which cannot be bound to an
+    /// `Arc<Vec<u8>>` variable — that compilation error is itself evidence that
+    /// the bug is present.
+    #[tokio::test]
+    async fn test_cache_get_returns_arc_no_deep_copy_on_hit() {
+        let cache = Cache::new(Duration::from_secs(60));
+        // 100 KB is representative of the PNG blobs described in the issue.
+        let data = vec![0xFFu8; 100_000];
+        cache.set("img".to_string(), data).await;
+
+        // If the return type is still Vec<u8> the next two lines will not
+        // compile, which is the intended failure signal for the unfixed code.
+        let first: Arc<Vec<u8>> = cache.get("img").await.expect("key must be present");
+        let second: Arc<Vec<u8>> = cache.get("img").await.expect("key must be present");
+
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "two cache hits for the same key must return Arc pointers to the \
+             same backing allocation, not independent deep copies (issue #8)"
         );
     }
 
