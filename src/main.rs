@@ -6,6 +6,7 @@
 mod avatar;
 mod cache;
 mod card;
+mod health;
 mod user;
 
 use axum::{Router, extract::Extension, routing::get, serve};
@@ -28,6 +29,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/card/{name}", get(card::generate_card))
+        .route("/health", get(health::health))
         .layer(Extension(cache)); // 傳遞快取到路由
 
     let listener = TcpListener::bind("0.0.0.0:3001").await.unwrap();
