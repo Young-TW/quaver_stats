@@ -10,5 +10,7 @@ pub mod avatar;
 pub mod cache;
 /// HTTP handler and image rendering for the player stats card.
 pub mod card;
+/// Liveness endpoint: GET /health.
+pub mod health;
 /// Quaver user data model and API fetching/parsing.
 pub mod user;

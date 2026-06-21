@@ -1,24 +1,39 @@
 use reqwest::Error;
 use serde::Deserialize;
 
-/// A Quaver player's profile and 7K statistics, flattened from the API
-/// response.
+/// Selects which key mode's statistics to display on the card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Keys4,
+    Keys7,
+}
+
+impl Mode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Mode::Keys4 => "4k",
+            Mode::Keys7 => "7k",
+        }
+    }
+}
+
+/// A Quaver player's profile and statistics, flattened from the API response.
 #[derive(Debug, Deserialize)]
 pub struct User {
     /// The player's username.
     pub name: String,
-    /// The player's global 7K rank.
+    /// The player's global rank for the selected mode.
     pub global_rank: u64,
-    /// The player's country 7K rank.
+    /// The player's country rank for the selected mode.
     pub country_rank: u64,
     /// The player's country code.
     pub country: String,
-    /// The player's overall 7K performance rating.
+    /// The player's overall performance rating for the selected mode.
     pub rating: f64,
-    /// The player's overall 7K accuracy, as a percentage.
+    /// The player's overall accuracy for the selected mode, as a percentage.
     pub accuracy: f64,
     /// URL of the player's avatar image.
-    pub avatar_url: String, // 新增欄位
+    pub avatar_url: String,
 }
 
 // API 回應的反序列化結構，抽出至模組層級以便單獨測試解析邏輯
@@ -53,9 +68,11 @@ struct UserResponse {
 struct RawUserDetail {
     username: String,
     country: String,
-    avatar_url: String, // 新增欄位
+    avatar_url: String,
+    #[serde(rename = "stats_keys4")]
+    stats4: RawStats,
     #[serde(rename = "stats_keys7")]
-    stats: RawStats,
+    stats7: RawStats,
 }
 
 #[derive(Debug, Deserialize)]
@@ -87,9 +104,9 @@ impl User {
 
     /// 從使用者 API 的 JSON 字串解析出 `User`。
     #[cfg(test)]
-    fn parse_stat(body: &str) -> Result<User, serde_json::Error> {
+    fn parse_stat(body: &str, mode: Mode) -> Result<User, serde_json::Error> {
         let result: UserResponse = serde_json::from_str(body)?;
-        Ok(User::from_detail(result.user))
+        Ok(User::from_detail(result.user, mode))
     }
 
     /// Looks up a player by `name` via the Quaver user-search API and returns
@@ -105,25 +122,29 @@ impl User {
     }
 
     /// Fetches the player with the given `id` from the Quaver user API and
-    /// builds a [`User`] from their 7K statistics.
+    /// builds a [`User`] from the statistics for the requested [`Mode`].
     ///
     /// Returns `Err` if the HTTP request fails or the JSON response cannot be
     /// deserialized.
-    pub async fn fetch_stat(id: u64) -> Result<User, Error> {
+    pub async fn fetch_stat(id: u64, mode: Mode) -> Result<User, Error> {
         let url = format!("https://api.quavergame.com/v2/user/{}", id);
         let response = reqwest::get(&url).await?;
         let result: UserResponse = response.json().await?;
-        Ok(User::from_detail(result.user))
+        Ok(User::from_detail(result.user, mode))
     }
 
-    fn from_detail(detail: RawUserDetail) -> User {
+    fn from_detail(detail: RawUserDetail, mode: Mode) -> User {
+        let stats = match mode {
+            Mode::Keys4 => detail.stats4,
+            Mode::Keys7 => detail.stats7,
+        };
         User {
             name: detail.username,
             country: detail.country,
-            global_rank: detail.stats.ranks.global,
-            country_rank: detail.stats.ranks.country,
-            rating: detail.stats.performance,
-            accuracy: detail.stats.accuracy,
+            global_rank: stats.ranks.global,
+            country_rank: stats.ranks.country,
+            rating: stats.performance,
+            accuracy: stats.accuracy,
             avatar_url: detail.avatar_url,
         }
     }
@@ -150,22 +171,29 @@ mod tests {
         assert!(User::parse_id("not json").is_err());
     }
 
-    #[test]
-    fn test_parse_stat_maps_all_fields() {
-        let body = r#"{
+    fn both_stats_body() -> &'static str {
+        r#"{
             "user": {
                 "username": "tyrcs",
                 "country": "CN",
                 "avatar_url": "https://example.com/a.png",
+                "stats_keys4": {
+                    "ranks": { "global": 10, "country": 3 },
+                    "overall_performance_rating": 500.00,
+                    "overall_accuracy": 97.00
+                },
                 "stats_keys7": {
                     "ranks": { "global": 1, "country": 2 },
                     "overall_performance_rating": 712.34,
                     "overall_accuracy": 98.76
                 }
             }
-        }"#;
+        }"#
+    }
 
-        let user = User::parse_stat(body).unwrap();
+    #[test]
+    fn test_parse_stat_maps_all_fields() {
+        let user = User::parse_stat(both_stats_body(), Mode::Keys7).unwrap();
         assert_eq!(user.name, "tyrcs");
         assert_eq!(user.country, "CN");
         assert_eq!(user.global_rank, 1);
@@ -176,10 +204,19 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_stat_uses_4k_stats_when_mode_keys4() {
+        let user = User::parse_stat(both_stats_body(), Mode::Keys4).unwrap();
+        assert_eq!(user.global_rank, 10);
+        assert_eq!(user.country_rank, 3);
+        assert!((user.rating - 500.00).abs() < f64::EPSILON);
+        assert!((user.accuracy - 97.00).abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn test_parse_stat_missing_field_errors() {
-        // 缺少 stats_keys7，應反序列化失敗
+        // 缺少 stats_keys4 與 stats_keys7，應反序列化失敗
         let body = r#"{ "user": { "username": "x", "country": "US", "avatar_url": "" } }"#;
-        assert!(User::parse_stat(body).is_err());
+        assert!(User::parse_stat(body, Mode::Keys7).is_err());
     }
 
     // Regression for issue #3: parse_id silently returned Ok(0) when the
@@ -206,7 +243,7 @@ mod tests {
         let id = User::fetch_id("tyrcs").await.unwrap();
         assert_eq!(id, 48618);
 
-        let user = User::fetch_stat(id).await.unwrap();
+        let user = User::fetch_stat(id, Mode::Keys7).await.unwrap();
         assert_eq!(user.name, "tyrcs");
         assert_eq!(user.country, "CN");
         assert!(user.rating > 700.0);

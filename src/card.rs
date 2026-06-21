@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Extension, Path},
+    extract::{Extension, Path, Query},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -14,11 +14,24 @@ use ab_glyph::{FontArc, PxScale};
 
 use crate::avatar::fetch_avatar_from_url;
 use crate::cache::Cache;
-use crate::user::User;
+use crate::user::{Mode, User};
 
 const BACKGROUND_REL_PATH: &str = "image/quaver.jpg";
 const CARD_WIDTH: u32 = 256;
 const CARD_HEIGHT: u32 = 192;
+
+#[derive(serde::Deserialize)]
+pub struct CardQuery {
+    mode: Option<String>,
+}
+
+fn parse_mode(s: Option<&str>) -> Result<Mode, ()> {
+    match s {
+        None | Some("7k") => Ok(Mode::Keys7),
+        Some("4k") => Ok(Mode::Keys4),
+        Some(_) => Err(()),
+    }
+}
 
 /// 解析背景圖的實際路徑。
 ///
@@ -54,24 +67,36 @@ pub fn validate_assets() -> Result<(), String> {
 
 /// Axum handler that returns a PNG stats card for the player named in the path.
 ///
+/// Accepts an optional `?mode=4k` or `?mode=7k` query parameter (default `7k`).
+/// Unknown mode values are rejected with `400 Bad Request`.
+///
 /// On a cache hit the cached PNG is returned directly. On a miss the card is
 /// generated and, on success, cached before being returned with a
 /// `Content-Type: image/png` header. Returns `404 Not Found` if no such player
 /// exists and `502 Bad Gateway` if an upstream request fails.
 pub async fn generate_card(
     Path(username): Path<String>,
+    Query(CardQuery { mode }): Query<CardQuery>,
     Extension(cache): Extension<Arc<Cache>>,
 ) -> Response {
+    let mode = match parse_mode(mode.as_deref()) {
+        Ok(m) => m,
+        Err(()) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+
     // Quaver usernames are case-insensitive; collapse to one cache slot per player.
+    // Cache key also includes the mode so 4K and 7K cards are stored independently.
     let key = username.to_lowercase();
+    let cache_key = format!("{}:{}", key, mode.as_str());
+
     // Deduplicate the cache-miss path: when several requests race on the same
     // cold key, exactly one renders the card and the rest await its result
     // instead of each generating independently (issue #11). A failed render
     // yields empty bytes, which `get_or_compute` neither caches nor treats as a
     // hit; the precise error status is resolved below.
     let bytes = cache
-        .get_or_compute(&key, || async {
-            generate_card_image(&key).await.unwrap_or_default()
+        .get_or_compute(&cache_key, || async {
+            generate_card_image(&key, mode).await.unwrap_or_default()
         })
         .await;
 
@@ -81,20 +106,20 @@ pub async fn generate_card(
 
     // Generation failed (or was not cached): resolve the error to its status.
     // Failures are intentionally not cached, preserving the original behavior.
-    let result = generate_card_image(&key).await;
-    resolve_card(&key, result, &cache).await
+    let result = generate_card_image(&key, mode).await;
+    resolve_card(&cache_key, result, &cache).await
 }
 
 // Caches the image on success and builds the appropriate HTTP response.
 // Extracted so that the caching/status logic can be tested without network calls.
 async fn resolve_card(
-    username: &str,
+    cache_key: &str,
     result: Result<Vec<u8>, CardError>,
     cache: &Cache,
 ) -> Response {
     match result {
         Ok(bytes) => {
-            cache.set(username.to_string(), bytes.clone()).await;
+            cache.set(cache_key.to_string(), bytes.clone()).await;
             ([(axum::http::header::CONTENT_TYPE, "image/png")], bytes).into_response()
         }
         Err(CardError::UserNotFound) => StatusCode::NOT_FOUND.into_response(),
@@ -102,24 +127,24 @@ async fn resolve_card(
     }
 }
 
-async fn generate_card_image(username: &str) -> Result<Vec<u8>, CardError> {
+async fn generate_card_image(username: &str, mode: Mode) -> Result<Vec<u8>, CardError> {
     let user_id = match User::fetch_id(username).await {
         Ok(0) => return Err(CardError::UserNotFound),
         Ok(id) => id,
         Err(_) => return Err(CardError::UpstreamError),
     };
 
-    let user_stat = match User::fetch_stat(user_id).await {
+    let user_stat = match User::fetch_stat(user_id, mode).await {
         Ok(u) => u,
         Err(_) => return Err(CardError::UpstreamError),
     };
 
     let avatar = fetch_avatar_from_url(&user_stat.avatar_url, (64, 64)).await;
-    Ok(render_card(&user_stat, &avatar))
+    Ok(render_card(&user_stat, &avatar, mode))
 }
 
 /// 將玩家資料與頭像渲染成 PNG 位元組（純函式，不依賴網路，便於測試）。
-fn render_card(user_stat: &User, avatar: &DynamicImage) -> Vec<u8> {
+fn render_card(user_stat: &User, avatar: &DynamicImage, mode: Mode) -> Vec<u8> {
     // 建立圖卡，使用背景圖
     let bg_img = ImageReader::open(background_path())
         .expect("無法打開背景圖")
@@ -137,7 +162,7 @@ fn render_card(user_stat: &User, avatar: &DynamicImage) -> Vec<u8> {
         .unwrap();
     let scale = PxScale::from(20.0);
 
-    for (i, line) in build_lines(user_stat).iter().enumerate() {
+    for (i, line) in build_lines(user_stat, mode).iter().enumerate() {
         draw_line(&mut img, line, 10, 80 + i as i32 * 20, scale, &font); // 調整文字位置
     }
 
@@ -150,9 +175,16 @@ fn render_card(user_stat: &User, avatar: &DynamicImage) -> Vec<u8> {
 }
 
 /// 根據玩家資料組出卡片要顯示的文字行。
-fn build_lines(user_stat: &User) -> Vec<String> {
+fn build_lines(user_stat: &User, mode: Mode) -> Vec<String> {
+    let mode_label = match mode {
+        Mode::Keys4 => "4K",
+        Mode::Keys7 => "7K",
+    };
     vec![
-        format!("{} ({})", user_stat.name, user_stat.country),
+        format!(
+            "{} ({}) [{}]",
+            user_stat.name, user_stat.country, mode_label
+        ),
         format!("Global Rank: #{}", user_stat.global_rank),
         format!("Country Rank: #{}", user_stat.country_rank),
         format!("rating: {:.2}", user_stat.rating),
@@ -191,10 +223,10 @@ mod tests {
     }
 
     #[test]
-    fn test_build_lines_formats_all_fields() {
-        let lines = build_lines(&sample_user());
+    fn test_build_lines_formats_all_fields_7k() {
+        let lines = build_lines(&sample_user(), Mode::Keys7);
         assert_eq!(lines.len(), 5);
-        assert_eq!(lines[0], "young (TW)");
+        assert_eq!(lines[0], "young (TW) [7K]");
         assert_eq!(lines[1], "Global Rank: #1234");
         assert_eq!(lines[2], "Country Rank: #56");
         // rating 與 accuracy 取小數點後兩位
@@ -203,9 +235,37 @@ mod tests {
     }
 
     #[test]
+    fn test_build_lines_shows_4k_label() {
+        let lines = build_lines(&sample_user(), Mode::Keys4);
+        assert_eq!(lines[0], "young (TW) [4K]");
+    }
+
+    #[test]
+    fn test_parse_mode_defaults_to_7k() {
+        assert_eq!(parse_mode(None), Ok(Mode::Keys7));
+    }
+
+    #[test]
+    fn test_parse_mode_accepts_7k() {
+        assert_eq!(parse_mode(Some("7k")), Ok(Mode::Keys7));
+    }
+
+    #[test]
+    fn test_parse_mode_accepts_4k() {
+        assert_eq!(parse_mode(Some("4k")), Ok(Mode::Keys4));
+    }
+
+    #[test]
+    fn test_parse_mode_rejects_unknown() {
+        assert!(parse_mode(Some("8k")).is_err());
+        assert!(parse_mode(Some("4K")).is_err()); // case-sensitive
+        assert!(parse_mode(Some("")).is_err());
+    }
+
+    #[test]
     fn test_render_card_produces_valid_png() {
         let avatar = DynamicImage::new_rgba8(64, 64);
-        let bytes = render_card(&sample_user(), &avatar);
+        let bytes = render_card(&sample_user(), &avatar, Mode::Keys7);
 
         assert!(!bytes.is_empty());
         // PNG 檔頭魔術位元組
@@ -223,10 +283,10 @@ mod tests {
     #[tokio::test]
     async fn test_missing_user_returns_404_and_not_cached() {
         let cache = Cache::new(Duration::from_secs(60));
-        let response = resolve_card("ghost", Err(CardError::UserNotFound), &cache).await;
+        let response = resolve_card("ghost:7k", Err(CardError::UserNotFound), &cache).await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         assert!(
-            cache.get("ghost").await.is_none(),
+            cache.get("ghost:7k").await.is_none(),
             "failed lookup must not be cached"
         );
     }
@@ -237,13 +297,14 @@ mod tests {
     #[tokio::test]
     async fn test_generate_card_normalizes_username_to_lowercase() {
         let cache = Arc::new(Cache::new(Duration::from_secs(60)));
-        // Pre-seed the cache under the canonical lowercase key.
-        cache.set("playername".to_string(), vec![0u8; 4]).await;
+        // Pre-seed the cache under the canonical lowercase key (default mode: 7k).
+        cache.set("playername:7k".to_string(), vec![0u8; 4]).await;
 
         // A mixed-case request must normalise to "playername" and hit the
         // pre-seeded entry without making any upstream network calls.
         let response = generate_card(
             Path("PlayerName".to_string()),
+            Query(CardQuery { mode: None }),
             Extension(Arc::clone(&cache)),
         )
         .await;
@@ -255,7 +316,7 @@ mod tests {
         );
         // The handler must not create a separate entry under the un-normalised key.
         assert!(
-            cache.get("PlayerName").await.is_none(),
+            cache.get("PlayerName:7k").await.is_none(),
             "un-normalised key must not be stored separately"
         );
     }
