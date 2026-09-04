@@ -6,7 +6,11 @@ quaver_stats provides a simple api to get player stats card from the quaver game
 
 ## Example
 
-once you run the server, you can access the player stats card by visiting the following URL:
+once you run the server, open the root URL in your browser for an interactive link generator with live card preview:
+
+`http://localhost:3001/`
+
+you can also access the player stats card directly by visiting the following URL:
 
 `https://localhost:3001/card/{username}`
 

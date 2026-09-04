@@ -12,5 +12,7 @@ pub mod cache;
 pub mod card;
 /// Liveness endpoint: GET /health.
 pub mod health;
+/// Landing page: interactive card link generator with preview (GET /).
+pub mod index;
 /// Quaver user data model and API fetching/parsing.
 pub mod user;

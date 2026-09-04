@@ -7,6 +7,7 @@ mod avatar;
 mod cache;
 mod card;
 mod health;
+mod index;
 mod user;
 
 use axum::{Router, extract::Extension, routing::get, serve};
@@ -28,6 +29,7 @@ async fn main() {
     let cache = Arc::new(Cache::new(Duration::from_secs(600)));
 
     let app = Router::new()
+        .route("/", get(index::index))
         .route("/card/{name}", get(card::generate_card))
         .route("/health", get(health::health))
         .layer(Extension(cache)); // 傳遞快取到路由
